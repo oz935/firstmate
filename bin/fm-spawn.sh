@@ -308,6 +308,16 @@
 #   containment test reads local refs only and never fetches, so this gate stays
 #   usable offline; a stale remote-tracking ref can therefore make an unpushed
 #   commit look contained, which is exactly why no remedy command is printed.
+#   A project clone whose main checkout deliberately carries core.bare=true (the
+#   flag lets one checkout double as a ref host that advances its own branches
+#   with a ref-only fetch) makes git refuse the work-tree operation `treehouse
+#   get` starts with, so its worktree is leased by this script instead and the
+#   pane is only told to cd into it - see lease_bare_clone_worktree. The clone's
+#   configuration is never written, and both paths converge on the same settle
+#   loop and isolation assertion; the leased path waits for the pane to reach the
+#   worktree it leased and accepts nothing else, and any abort before the task
+#   record is committed returns that durable lease to the pool unless a launched
+#   agent may still be running there.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1348,6 +1358,13 @@ BACKEND=
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+# Set only while this process holds a durable treehouse lease that no state file
+# records yet. `treehouse get --lease` hands out a worktree that is never pruned
+# and never handed to a later get, and fm-teardown.sh can only release a task
+# that has a state/<id>.meta, so every abort between the lease and the meta write
+# would otherwise burn a pool slot with no firstmate command able to free it.
+LEASED_WT=
+LEASED_WT_REAL=
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -1423,6 +1440,8 @@ spawn_orca_reclaim_launch_file() {
 
 spawn_abort_cleanup() {
   local status=$?
+  local leased_wt=
+  local -a release_args
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -1504,6 +1523,33 @@ spawn_abort_cleanup() {
             true
         fi
       fi
+    fi
+  fi
+  # A lease is returned only while no launched agent can still be running in it;
+  # otherwise the tree stays leased for the by-hand close-out the failure names.
+  if [ -n "${LEASED_WT:-}" ] &&
+    { [ "$SPAWN_LAUNCH_SENT" = 1 ] && [ "$SPAWN_ENDPOINT_CLOSED" != 1 ]; }; then
+    echo "warning: leaving the worktree leased for $ID in place because its launched agent may still be running there; once that endpoint is closed, release it with 'treehouse return --force $LEASED_WT' from $PROJ_ABS" >&2
+    LEASED_WT=
+  fi
+  if [ -n "${LEASED_WT:-}" ]; then
+    leased_wt=$LEASED_WT
+    LEASED_WT=
+    # --if-lease-holder makes the release a no-op unless this task still owns the
+    # lease, so a concurrent re-lease of the same pool tree cannot be stolen. It
+    # postdates the treehouse this repo pins, so capability-detect it the same way
+    # the --lease support above is detected. On a binary without it the release
+    # still has to happen unguarded - a skipped release burns the pool slot, which
+    # is the leak this cleanup exists to close - and holder identity simply cannot
+    # be verified there.
+    release_args=(--force)
+    if treehouse return --help 2>&1 \
+       | grep -Eq '(^|[^[:alnum:]_-])--if-lease-holder([^[:alnum:]_-]|$)'; then
+      release_args+=(--if-lease-holder "$ID")
+    fi
+    release_args+=("$leased_wt")
+    if ! ( cd "$PROJ_ABS" && treehouse return "${release_args[@]}" ) >/dev/null 2>&1; then
+      echo "warning: could not release the worktree leased for $ID; the pool slot stays leased until you run 'treehouse return --force $leased_wt' from $PROJ_ABS" >&2
     fi
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
@@ -3782,6 +3828,62 @@ freshen_spawn_worktree_base() { # <worktree> [<base-branch>]
   fi
 }
 
+# True when the project clone carries core.bare=true on its main checkout. A
+# harness may set that flag deliberately so the checkout can double as a ref host
+# that advances its own branches with a ref-only `git fetch origin <b>:<b>`, which
+# git permits on a checked-out branch only while the flag is set. The files stay on
+# disk, but git then refuses every work-tree operation against the clone.
+# `rev-parse --is-bare-repository` is the signal rather than a `config --get
+# core.bare` read because it reports git's own discovery-time verdict - the very
+# state that makes those operations fail - however the flag was arrived at.
+project_is_bare_flagged() {
+  [ "$(git -C "$PROJ_ABS" rev-parse --is-bare-repository 2>/dev/null)" = true ]
+}
+
+# Lease a pool worktree for a bare-flagged clone and print its path.
+#
+# `treehouse get` starts by resolving the repo from its working directory with
+# `git rev-parse --show-toplevel`, which is a work-tree operation, so against a
+# bare-flagged clone it dies with "this operation must be run in a work tree"
+# before any worktree exists. GIT_WORK_TREE is the only override that reaches
+# that resolution: git decides bare-ness during repository discovery, before
+# -c/GIT_CONFIG_* injected config is applied, so a scoped core.bare=false
+# override is silently ignored while GIT_WORK_TREE is honoured. Nothing here
+# writes to the clone's configuration, so the deliberate flag survives untouched.
+#
+# GIT_WORK_TREE must be RELATIVE. An absolute path pins every git process
+# treehouse spawns to the clone's work tree, including the per-worktree
+# cleanliness checks it runs as `git -C <pool-tree> status`; those then report
+# the CLONE's dirt, every pooled tree reads dirty, and treehouse refuses to reuse
+# any of them once the pool is full. `.` resolves against each invocation's own
+# directory, so discovery in the clone succeeds while treehouse's per-tree checks
+# still see the pool tree.
+#
+# --lease is what keeps the override off the worker's shell. Plain `treehouse
+# get` execs an interactive subshell that would inherit GIT_WORK_TREE, and inside
+# the worktree that variable silently redirects git at another directory - a
+# leaked absolute value makes `git status` there report the primary checkout's
+# files. Leasing acquires the worktree in this process and prints its path, so
+# the pane is only ever told to cd into a ready worktree with a clean
+# environment. The lease is durable and released by fm-teardown.sh's existing
+# `treehouse return --force`, which needs no work tree of its own.
+lease_bare_clone_worktree() {
+  local wt
+  if ! treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'; then
+    echo "error: project $PROJ_ABS has core.bare=true, which needs 'treehouse get --lease' to acquire a worktree, but the installed treehouse does not support --lease. Upgrade treehouse (bin/fm-install-treehouse.sh) and retry." >&2
+    return 1
+  fi
+  wt=$(cd "$PROJ_ABS" && GIT_WORK_TREE=. treehouse get --lease --lease-holder "$ID") || {
+    echo "error: treehouse get --lease failed to lease a worktree from bare-flagged clone $PROJ_ABS" >&2
+    return 1
+  }
+  [ -n "$wt" ] || {
+    echo "error: treehouse get --lease did not report a worktree for bare-flagged clone $PROJ_ABS" >&2
+    return 1
+  }
+  printf '%s\n' "$wt"
+}
+
 herdr_projection_meta_field_exact() { # <meta> <key>
   local meta=$1 key=$2 count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -4650,7 +4752,24 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # An ordinary clone lets the pane run `treehouse get` itself, which acquires a
+  # worktree and cd's the pane into it. A bare-flagged clone cannot: see
+  # lease_bare_clone_worktree for why the acquire has to happen here instead, with
+  # the pane only told to cd into the worktree that call already leased. Both
+  # branches share the settle loop and the isolation assertion below, but they
+  # wait differently: the leased path waits for the pane to reach the worktree it
+  # already holds and accepts nothing else, while the ordinary path, which learns
+  # its destination only from the pane, keeps the two-consecutive-reads guard
+  # against a transient stale path. validate_spawn_worktree runs on both.
+  ACQUIRE_SOURCE='treehouse get'
+  if project_is_bare_flagged; then
+    ACQUIRE_SOURCE='treehouse get --lease'
+    LEASED_WT=$(lease_bare_clone_worktree) || exit 1
+    LEASED_WT_REAL=$(real_path_or_raw "$LEASED_WT")
+    spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$LEASED_WT")"
+  else
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  fi
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -4684,6 +4803,17 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # misconfiguration would need machinery this path does not want - so the
   # refusal has to be self-explaining instead: carry the last path seen and the
   # reason it was rejected, and report both at the deadline.
+  #
+  # A bare-flagged clone's leased path already knows its destination, so it
+  # waits for that exact isolated path and accepts nothing else: a stale reading
+  # can never be mistaken for the destination however often it repeats. Never
+  # reaching it inside the wait is the terminal failure - fail closed, because
+  # launching in an unleased tree would leave the leased one held with nobody to
+  # return it - and the abort cleanup releases the lease. The resolved
+  # comparison only decides that the pane arrived; what gets recorded is
+  # treehouse's own spelling of the leased path, not the pane's
+  # physically-resolved cwd, because `treehouse return` matches the path it
+  # recorded literally and rejects an equivalent spelling as unmanaged.
   candidate=""
   last_seen=""
   last_reason="the pane reported no path"
@@ -4692,8 +4822,16 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     [ -z "$p" ] || last_seen="$p"
     if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
       p_real=$(real_path_or_raw "$p")
-      last_reason="it is an isolated worktree, but no second read agreed with it"
-      if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
+      if [ -n "$LEASED_WT" ]; then
+        last_reason="it is an isolated worktree, but not the one leased for this task"
+        if [ "$p_real" = "$LEASED_WT_REAL" ]; then
+          WT="$LEASED_WT"
+          break
+        fi
+      else
+        last_reason="it is an isolated worktree, but no second read agreed with it"
+      fi
+      if [ -z "$LEASED_WT" ] && [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
         WT="$p"
         break
       fi
@@ -4702,14 +4840,18 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       candidate=""
       [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
     fi
-    sleep 1
+    sleep "${FM_SPAWN_SETTLE_INTERVAL:-1}"
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+    if [ -n "$LEASED_WT" ]; then
+      echo "error: $ACQUIRE_SOURCE leased '$LEASED_WT' (resolved '$LEASED_WT_REAL') for $ID but window $T never settled there (last seen '${last_seen:-none}': $last_reason); refusing to launch in a worktree that was never leased for this task. Inspect window $T" >&2
+      exit 1
+    fi
+    echo "error: $ACQUIRE_SOURCE did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  validate_spawn_worktree "$ACQUIRE_SOURCE" "$T"
 
   # Claim the pool slot for this task. The interactive `treehouse get` sent to
   # the pane above records only a process lease (Treehouse's durable
@@ -4720,7 +4862,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # bin/fm-teardown.sh leave a slot that has since been reassigned untouched, so
   # a slot that cannot be claimed is refused here, at the cheapest point, rather
   # than launching a worker whose slot teardown could later release out from
-  # under its successor.
+  # under its successor. A bare-flagged clone's durable lease from
+  # lease_bare_clone_worktree takes the same claim, so teardown treats both
+  # acquisitions alike.
   # Written under the Treehouse project lock held from before slot allocation
   # through metadata publication, so no other spawn or return sees a half-claim.
   if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
@@ -6099,6 +6243,10 @@ trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
 fi
+# From here the fresh record is committed rather than provisional, so
+# fm-teardown.sh owns a bare-flagged clone's lease and a later abort must not
+# return it out from under a live task.
+LEASED_WT=
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   case "$SPAWN_DEFERRED_SIGNAL" in
   HUP) SPAWN_DEFERRED_SIGNAL_STATUS=129 ;;

@@ -286,6 +286,11 @@ Crewmates never intentionally touch your project clone; [treehouse](https://gith
 The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns ship/scout worktree isolation and fresh-base refusal rules, including spawns from linked homes.
 Portable regressions live in [`tests/fm-spawn-pool-base-freshen.test.sh`](../tests/fm-spawn-pool-base-freshen.test.sh) for spawn isolation and base freshness, and [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh) for preserving the recorded copy on relaunch.
 
+A project clone whose main checkout deliberately carries `core.bare=true` makes git refuse the work-tree operation the pane's own `treehouse get` starts with, so for those clones `fm-spawn.sh` leases the pooled task worktree itself and only tells the pane to `cd` into it; the clone's configuration is never written, and the isolation assertion above still runs.
+That per-task lease is distinct from the secondmate home lease below: `fm-spawn.sh`'s abort cleanup returns it until the task record is committed, unless a launched agent may still be running there, after which `fm-teardown.sh` owns its release.
+A pane that never settles in the leased worktree fails the spawn rather than launching in a worktree that was never leased for the task.
+`bin/fm-spawn.sh`'s header owns the exact acquisition mechanism, its treehouse version requirement, and the environment scoping that keeps the override off the crewmate's shell.
+
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
 The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.
