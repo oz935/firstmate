@@ -40,9 +40,13 @@
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the status log's last line only
-#      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      recorded backend's pane busy state, then the NEWEST status-log line that
+#      carries a recognized verb, only when that verb maps to a run-state. An
+#      append is routinely multi-line, so the last PHYSICAL line is usually
+#      continuation prose carrying no verb; the continuation text is folded into
+#      the reported note. Decision-only events such as `resolved` never become
+#      current state or detail, and reaching one ends the search rather than
+#      reviving the decision it just closed.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
@@ -110,11 +114,6 @@ fi
 
 # --- status log ------------------------------------------------------------
 
-# Last non-empty status line, and its leading verb (the word before the colon).
-log_last_line() {
-  [ -f "$LOG" ] || return 1
-  grep -v '^[[:space:]]*$' "$LOG" 2>/dev/null | tail -1
-}
 # Map a status-log verb onto a canonical state for the fallback path. `paused` is
 # the deliberate-external-wait verb (fm-classify-lib.sh's FM_CLASSIFY_PAUSED_VERB):
 # a crew with no active run and an idle pane that declared a known external wait
@@ -135,7 +134,59 @@ map_log_state() {  # <line>
   esac
 }
 
-LOG_LINE=$(log_last_line || true)
+# Verbs that CLOSE a keyed decision instead of describing a state (fm-classify-lib.sh
+# owns the vocabulary). Reaching one while scanning back ENDS the scan: it is the
+# newest real event, and a crew that just closed a decision is idle, not still parked.
+# Walking past it would revive the very needs-decision/blocked line it closed.
+log_verb_is_decision_only() {  # <verb>
+  case "$1" in
+    "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}") return 0 ;;
+    "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Select the newest status line that actually CARRIES a verb, not the last physical
+# line. A status append is routinely multi-line - the verb sits on the first physical
+# line and the rest is continuation prose - so `tail -1` returns a continuation line
+# whose "verb" (status_line_verb takes everything before the first colon) is prose
+# that maps to no state, and a crew genuinely parked at a gate read as `unknown`.
+#
+# Scans newest-first and stops at the first line whose verb is recognized, either as
+# a run-state (map_log_state, the one owner of that mapping, including the
+# configurable paused verb) or as a decision-only verb. Skipped lines are the
+# continuation of that append, so they are folded back into the note: the reported
+# reason stays as useful as the crew wrote it. LOG_NOTE is collapsed to a single line
+# because `emit` promises one parseable line.
+#
+# Stopping early keeps the common case cheap (an append is a handful of lines); the
+# degenerate all-prose file costs one pass, the same file read `tail -1` already did.
+LOG_LINE=""
+LOG_NOTE=""
+select_log_line() {
+  [ -f "$LOG" ] || return 0
+  local line cont="" found
+  while IFS= read -r line; do
+    found=0
+    if [ "$(map_log_state "$line")" != unknown ]; then
+      found=1
+    elif log_verb_is_decision_only "$(status_line_verb "$line")"; then
+      found=1
+    fi
+    if [ "$found" = 1 ]; then
+      LOG_LINE=$line
+      LOG_NOTE=$(status_line_note "$line")
+      [ -n "$cont" ] && LOG_NOTE="$LOG_NOTE $cont"
+      LOG_NOTE=$(printf '%s' "$LOG_NOTE" | tr -s '[:space:]' ' ')
+      LOG_NOTE=${LOG_NOTE#" "}
+      LOG_NOTE=${LOG_NOTE%" "}
+      return 0
+    fi
+    if [ -n "$cont" ]; then cont="$line $cont"; else cont=$line; fi
+  done < <(grep -v '^[[:space:]]*$' "$LOG" 2>/dev/null \
+    | awk '{ a[NR] = $0 } END { for (i = NR; i > 0; i--) print a[i] }')
+}
+select_log_line
 LOG_VERB=$(status_line_verb "$LOG_LINE")
 
 # pane_readable is consulted ONLY in the no-run fallback below. The run-step path
@@ -243,7 +294,7 @@ nm_gate_findings_count() {
 }
 log_reports_ci_ready() {
   [ "$LOG_VERB" = "done" ] || return 1
-  case "$(status_line_note "$LOG_LINE")" in
+  case "$LOG_NOTE" in
     *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
     *) return 1 ;;
   esac
@@ -498,7 +549,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      emit "done" status-log "$LOG_NOTE${SEP}run still monitoring PR"
     fi
     [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
     if [ "$RUN_STATUS" = fixing ]; then
@@ -509,7 +560,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       CI_LOG_STATE=not-ready
     fi
     if [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      emit "done" status-log "$LOG_NOTE${SEP}run still monitoring PR"
     fi
   fi
 
@@ -553,20 +604,22 @@ if [ "$KIND" != secondmate ]; then
   esac
 fi
 
-# Fall back to the status log's last line, but ONLY when its verb maps to a real
-# run-state. A decision-closing event - resolved: (fm-classify-lib.sh's
-# FM_CLASSIFY_RESOLVE_VERB), and any future decision-only sibling - is NOT a state:
-# it exists solely to CLOSE a keyed decision in the durable fold, so a trailing
-# resolved: must never become the current state or leak its resolution prose as the
-# detail. Skipping it lets a just-resolved idle crew (typically a secondmate, which
-# has no busy check above) fall through to the idle default instead of rendering
-# `unknown` with the resolution note as `doing`. map_log_state is the single owner of
-# the verb->state mapping (including the configurable paused verb), so reusing its
+# Fall back to the status log's newest VERB-carrying line (select_log_line above),
+# but ONLY when that verb maps to a real run-state. A decision-closing event -
+# resolved: (fm-classify-lib.sh's FM_CLASSIFY_RESOLVE_VERB), and any future
+# decision-only sibling - is NOT a state: it exists solely to CLOSE a keyed decision
+# in the durable fold, so a trailing resolved: must never become the current state or
+# leak its resolution prose as the detail. It also ENDS the scan rather than being
+# skipped over, so the decision it closed is not revived as a stale `parked`.
+# Rejecting it here lets a just-resolved idle crew (typically a secondmate, which has
+# no busy check above) fall through to the idle default instead of rendering `unknown`
+# with the resolution note as `doing`. map_log_state is the single owner of the
+# verb->state mapping (including the configurable paused verb), so reusing its
 # `unknown` verdict as the "not a state" test needs no second verb list here.
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then
-    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
+    emit "$LOG_STATE" status-log "$LOG_NOTE"
   fi
 fi
 

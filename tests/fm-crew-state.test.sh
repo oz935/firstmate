@@ -25,6 +25,9 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) MULTI-LINE appends: the newest VERB-carrying line wins over the last
+#       physical line, continuation prose is kept as the note, a decision-closing
+#       verb ends the scan, and an active parked run stays authoritative.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1030,6 +1033,114 @@ test_no_run_idle_secondmate_resolved_event_not_state() {
   pass "a trailing resolved: event does not corrupt state render (idle stays idle)"
 }
 
+# (l) A status append is routinely MULTI-LINE: the verb sits on the first physical
+# line and the rest is continuation prose. Reading the last PHYSICAL line returned
+# that continuation, whose "verb" is prose mapping to no state, so a crew genuinely
+# parked at a gate reported `unknown · none` and supervision re-flagged a correctly
+# waiting worker as a wedge suspect every cycle. Observed live on 2026-08-08: the
+# same task reported `parked` earlier the same day, the only difference being that
+# its newest append happened to be a single line - the failure tracked append SHAPE,
+# not task state. The newest VERB-carrying line is what must be selected.
+test_no_run_idle_pane_multiline_needs_decision() {
+  reset_fakes
+  local d; d=$(new_case multiline-decision)
+  make_repo_on_branch "$d/wt" fm/feat-ml
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ml.meta" "window=fm:fm-feat-ml" "worktree=$d/wt" "kind=ship" "harness=claude"
+  {
+    printf 'working: earlier progress\n'
+    printf 'needs-decision [key=gh91-tail]: gh-91 review gate, ONE ask-user finding.\n'
+    printf 'I WILL FOLD TWO OTHERS INTO THE SAME RESPOND once you decide.\n'
+    printf 'Both are mine under existing rules.\n'
+  } > "$d/state/feat-ml.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-ml
+  local out; out=$(run_crew_state "$d" feat-ml)
+  assert_contains "$out" "state: parked" "multi-line needs-decision append -> parked, not unknown"
+  assert_contains "$out" "source: status-log" "multi-line append still reports a status-log source"
+  assert_not_contains "$out" "state: unknown" "a parked crew is never reported unknown"
+  assert_contains "$out" "gh-91 review gate" "the verb line's own note is reported"
+  assert_contains "$out" "FOLD TWO OTHERS" "continuation prose is kept as part of the note"
+  assert_equals "1" "$(printf '%s' "$out" | grep -c '')" "emit stays ONE parseable line"
+  pass "a multi-line needs-decision append reports parked with its full reason"
+}
+
+# The paused half of the same fix. status_is_paused runs BEFORE the verb case in
+# map_log_state and must keep winning across the multi-line scan, so a declared
+# external wait still reads as a deliberate pause (with its reason) rather than a
+# wedge-suspect idle - the distinction the watcher's bounded pause cadence rests on.
+test_no_run_idle_pane_multiline_paused() {
+  reset_fakes
+  local d; d=$(new_case multiline-paused)
+  make_repo_on_branch "$d/wt" fm/feat-mlp
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-mlp.meta" "window=fm:fm-feat-mlp" "worktree=$d/wt" "kind=ship" "harness=claude"
+  {
+    printf 'paused: holding for the upstream tool release\n'
+    printf 'Vendor says the tag lands Thursday; nothing to do until then.\n'
+  } > "$d/state/feat-mlp.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-mlp
+  local out; out=$(run_crew_state "$d" feat-mlp)
+  assert_contains "$out" "state: paused" "multi-line paused append still -> paused"
+  assert_contains "$out" "source: status-log" "multi-line pause -> status-log source"
+  assert_contains "$out" "holding for the upstream tool release" "the pause reason survives the scan"
+  assert_contains "$out" "lands Thursday" "pause continuation prose is kept too"
+  pass "a multi-line paused append still reports paused with its reason"
+}
+
+# The scan must not walk PAST a decision-closing verb. `resolved` maps to no state,
+# exactly like continuation prose does, so a scan that skipped every non-state line
+# would sail past it and revive the older needs-decision it just closed - reporting
+# `parked` for a decision that is explicitly shut. Multi-line variant of the
+# single-line guard in test_no_run_idle_secondmate_resolved_event_not_state.
+test_no_run_idle_multiline_resolved_does_not_revive_decision() {
+  reset_fakes
+  local d; d=$(new_case multiline-resolved)
+  mkdir -p "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/mate2.meta" "window=fm:fm-mate2" "worktree=$d/wt" "kind=secondmate" "home=$d/wt"
+  {
+    printf 'needs-decision [key=race]: pick subscribe order\n'
+    printf 'resolved [key=race]: went with subscribe-before-write\n'
+    printf 'The runner drains before the status write, so no generation guard is needed.\n'
+  } > "$d/state/mate2.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" mate2)
+  assert_contains "$out" "state: unknown" "a closed decision is not revived by the multi-line scan"
+  assert_contains "$out" "source: none" "resolved ends the scan instead of falling further back"
+  assert_not_contains "$out" "state: parked" "the closed needs-decision must not resurface as parked"
+  assert_not_contains "$out" "pick subscribe order" "the closed decision's prose must not leak into the detail"
+  pass "a multi-line resolved append ends the scan instead of reviving the closed decision"
+}
+
+# The run-step path is AUTHORITATIVE, so a crew with an active run parked at a gate
+# must report parked from the run itself - independently of whatever shape its status
+# log happens to be in. This pins the promise directly: same multi-line append, but
+# now with a real parked run attributed to the branch.
+test_active_parked_run_never_reports_unknown_on_multiline_log() {
+  reset_fakes
+  local d; d=$(new_case multiline-parked-run)
+  make_repo_on_branch "$d/wt" fm/feat-mlrun
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-mlrun.meta" "window=fm:fm-feat-mlrun" "worktree=$d/wt" "kind=ship" "harness=claude"
+  {
+    printf 'needs-decision [key=gh91-tail]: gh-91 review gate, ONE ask-user finding.\n'
+    printf 'I WILL FOLD TWO OTHERS INTO THE SAME RESPOND once you decide.\n'
+  } > "$d/state/feat-mlrun.status"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-mlrun)"
+  local out; out=$(run_crew_state "$d" feat-mlrun)
+  assert_contains "$out" "state: parked" "an active run parked at a gate reports parked"
+  assert_contains "$out" "source: run-step" "the parked verdict comes from the authoritative run"
+  assert_not_contains "$out" "state: unknown" "a run parked at a gate is never reported unknown"
+  assert_contains "$out" "2 finding(s)" "the gate's finding count still reaches the reader"
+  assert_not_contains "$out" "superseded" "an agreeing multi-line needs-decision is not flagged stale"
+  pass "an active run parked at a gate never reports unknown, whatever the log's shape"
+}
+
 test_dead_window_ignores_stale_status_log() {
   reset_fakes
   local d; d=$(new_case dead-window)
@@ -1344,6 +1455,10 @@ test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
+test_no_run_idle_pane_multiline_needs_decision
+test_no_run_idle_pane_multiline_paused
+test_no_run_idle_multiline_resolved_does_not_revive_decision
+test_active_parked_run_never_reports_unknown_on_multiline_log
 test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
