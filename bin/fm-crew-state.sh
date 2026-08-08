@@ -135,9 +135,13 @@ map_log_state() {  # <line>
 }
 
 # Verbs that CLOSE a keyed decision instead of describing a state (fm-classify-lib.sh
-# owns the vocabulary). Reaching one while scanning back ENDS the scan: it is the
-# newest real event, and a crew that just closed a decision is idle, not still parked.
-# Walking past it would revive the very needs-decision/blocked line it closed.
+# owns the vocabulary). Reaching one while scanning back ENDS the scan, because it is
+# the newest real EVENT and a crew that just closed a decision is idle, not parked:
+# scanning past a non-state line is only ever meant to skip continuation prose, and
+# walking past this one instead would resurrect an older needs-decision as a live
+# `parked`. This is deliberately key-BLIND, like every other read here - which key is
+# still open is the durable fold's question, answered by fm-classify-lib.sh's
+# status_open_decisions, not by this last-event-wins current-state read.
 log_verb_is_decision_only() {  # <verb>
   case "$1" in
     "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}") return 0 ;;
@@ -610,7 +614,9 @@ fi
 # decision-only sibling - is NOT a state: it exists solely to CLOSE a keyed decision
 # in the durable fold, so a trailing resolved: must never become the current state or
 # leak its resolution prose as the detail. It also ENDS the scan rather than being
-# skipped over, so the decision it closed is not revived as a stale `parked`.
+# skipped over, so an older needs-decision is not resurrected as a stale `parked`.
+# Like the rest of this read it is last-event-wins and key-blind; which keyed
+# decisions remain open is status_open_decisions' question, not this file's.
 # Rejecting it here lets a just-resolved idle crew (typically a secondmate, which has
 # no busy check above) fall through to the idle default instead of rendering `unknown`
 # with the resolution note as `doing`. map_log_state is the single owner of the
