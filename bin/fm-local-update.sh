@@ -74,12 +74,13 @@ esac
 # made is gone - that is the manifest's rule 3, and it is the failure this whole
 # mechanism exists to catch.
 
-PATCH_IDS="spawn-bare-clone fleet-sync-bare-clone spawn-settings-pretty-print"
+PATCH_IDS="spawn-bare-clone fleet-sync-bare-clone spawn-settings-pretty-print brief-decision-key-format"
 
 patch_file() {
   case "$1" in
     spawn-bare-clone | spawn-settings-pretty-print) echo "bin/fm-spawn.sh" ;;
     fleet-sync-bare-clone) echo "bin/fm-fleet-sync.sh" ;;
+    brief-decision-key-format) echo "bin/fm-brief.sh" ;;
   esac
 }
 
@@ -93,6 +94,9 @@ patch_source() {
       ;;
     spawn-settings-pretty-print)
       echo "fm/fm-settings-local-minified@f7a8e3bf093e6e9c3b80764e67fe61fd06f2ab4c"
+      ;;
+    brief-decision-key-format)
+      echo "fm/fm-brief-decision-key-format@611d0c9ff6e5ecbc2380e8da4c2ea827d0bf4d76"
       ;;
   esac
 }
@@ -163,6 +167,21 @@ verify_one() {
       fi
       if grep -q '{"hooks":{"UserPromptSubmit"' "$f"; then
         VERIFY_DETAIL="the minified settings writer is back"
+        return 1
+      fi
+      ;;
+    brief-decision-key-format)
+      # The keyed status spelling every scaffold teaches: a canonical resolved
+      # template in each of the three scaffolds (ship, scout, secondmate
+      # charter), and the absence of the trailing parenthetical that read
+      # literally as the note-leading spelling. The count catches a replay
+      # conflict resolved in only some of the scaffolds.
+      if [ "$(grep -c 'resolved \[key=<slug>\]: ' "$f")" -lt 3 ]; then
+        VERIFY_DETAIL="a scaffold lost its canonical resolved [key=<slug>]: template"
+        return 1
+      fi
+      if grep -q 'if you opened it with one)' "$f"; then
+        VERIFY_DETAIL="the ambiguous trailing key parenthetical is back"
         return 1
       fi
       ;;
