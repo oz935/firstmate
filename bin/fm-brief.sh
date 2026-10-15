@@ -245,7 +245,13 @@ Never append \`working:\` merely to acknowledge receipt or announce that a marke
 When a routed-work phase has a supervisor-actionable material change worth reporting under the rule above, give that reported phase a stable key.
 If its first reportable event is \`working [key=<work-slug>]: {material phase}\`, use the same key on its later \`$PAUSED_VERB\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event so the earlier working phase is superseded.
 When a keyed phase ends without another reportable state, append \`resolved [key=<work-slug>]: {why it is no longer active}\`.
-When a decision you escalated is answered or a blocker clears and your domain resumes, append \`resolved: {how it was decided or unblocked}\` (keyed with \`[key=<slug>]\` if you opened it with one) so it is durably closed instead of resurfacing behind later unrelated events.
+When a decision you escalated is answered or a blocker clears and your domain resumes, append a \`resolved\` line so it is durably closed instead of resurfacing behind later unrelated events.
+Put the key token between the verb and the colon and reuse the exact key you opened the event with; copy one of these templates, replacing only <slug> and the text after the colon (a slug uses only letters, digits, \`.\`, \`_\`, and \`-\`, such as \`api-shape\`; any other character makes the whole line unreadable):
+    needs-decision [key=<slug>]: {summary of options}
+    blocked [key=<slug>]: {why}
+    resolved [key=<slug>]: {how it was decided or unblocked}
+These shapes are WRONG, because the token is not read as the key and the line can close an unrelated decision or leave its own open: \`resolved: [key=<slug>] ...\`, \`[key=<slug>] resolved: ...\`, \`resolved [<slug>]: ...\`.
+If you opened the event with no key, close it with a bare \`resolved: {how it was decided or unblocked}\`.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 
 # Definition of done
@@ -329,7 +335,13 @@ The report is the only thing that survives, so anything worth keeping must be in
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
-   When firstmate replies or a blocker clears and you resume, append \`resolved: {how it was decided or unblocked}\` (add the same \`[key=<slug>]\` if you opened it with one) so the decision or blocker is durably closed and does not keep resurfacing.
+   When firstmate replies or a blocker clears and you resume, append a \`resolved\` line so the decision or blocker is durably closed and does not keep resurfacing.
+   Put the key token between the verb and the colon and reuse the exact key you opened the event with; copy one of these templates, replacing only <slug> and the text after the colon (a slug uses only letters, digits, \`.\`, \`_\`, and \`-\`, such as \`api-shape\`; any other character makes the whole line unreadable):
+       needs-decision [key=<slug>]: {summary of options}
+       blocked [key=<slug>]: {why}
+       resolved [key=<slug>]: {how it was decided or unblocked}
+   These shapes are WRONG, because the token is not read as the key and the line can close an unrelated decision or leave its own open: \`resolved: [key=<slug>] ...\`, \`[key=<slug>] resolved: ...\`, \`resolved [<slug>]: ...\`.
+   If you opened the event with no key, close it with a bare \`resolved: {how it was decided or unblocked}\`.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
@@ -444,7 +456,13 @@ $RULE1
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will apply the configured authority and reply with the decision.
-   When firstmate replies or a blocker clears and you resume, append \`resolved: {how it was decided or unblocked}\` (add the same \`[key=<slug>]\` if you opened it with one) so the decision or blocker is durably closed and does not keep resurfacing.
+   When firstmate replies or a blocker clears and you resume, append a \`resolved\` line so the decision or blocker is durably closed and does not keep resurfacing.
+   Put the key token between the verb and the colon and reuse the exact key you opened the event with; copy one of these templates, replacing only <slug> and the text after the colon (a slug uses only letters, digits, \`.\`, \`_\`, and \`-\`, such as \`api-shape\`; any other character makes the whole line unreadable):
+       needs-decision [key=<slug>]: {summary of options}
+       blocked [key=<slug>]: {why}
+       resolved [key=<slug>]: {how it was decided or unblocked}
+   These shapes are WRONG, because the token is not read as the key and the line can close an unrelated decision or leave its own open: \`resolved: [key=<slug>] ...\`, \`[key=<slug>] resolved: ...\`, \`resolved [<slug>]: ...\`.
+   If you opened the event with no key, close it with a bare \`resolved: {how it was decided or unblocked}\`.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
