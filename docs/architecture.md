@@ -138,6 +138,11 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 
+A project clone whose main checkout deliberately carries `core.bare=true` makes git refuse the work-tree operation the pane's own `treehouse get` starts with, so for those clones `fm-spawn.sh` leases the pooled task worktree itself and only tells the pane to `cd` into it; the clone's configuration is never written, and the isolation assertion above still runs.
+That per-task lease is distinct from the secondmate home lease below: `fm-spawn.sh`'s abort cleanup returns it until `state/<id>.meta` records the worktree, after which `fm-teardown.sh` owns its release.
+A pane that never settles in the leased worktree fails the spawn rather than launching in a worktree that was never leased for the task.
+`bin/fm-spawn.sh`'s header owns the exact acquisition mechanism, its treehouse version requirement, and the environment scoping that keeps the override off the crewmate's shell.
+
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
 The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.
@@ -291,6 +296,7 @@ Invoked in a primary home, `/stow` then cascades the same sweep to every registe
 The locked session-start deferred network stage, PR-based teardown, and merged-PR wake handling refresh remote-backed project clones when the clone is safe to move.
 Wake-time refreshes can target a single clone by project name, so the primary home also catches up when a secondmate reports a merge from its own home.
 Clean default-branch clones fast-forward to `origin/<default>`, and a clean detached HEAD that holds no unique commits is re-attached to the default branch before the same fast-forward path runs.
+A clone whose own harness deliberately sets `core.bare=true` on its checkout advances instead through a ref-only `git fetch origin <branch>:<branch>`, because git refuses every work-tree operation there, which also makes the dirty-tree check impossible; git still refuses a non-fast-forward update, so a genuinely stuck bare clone is still reported as a skip rather than silently advanced.
 Dirty clones, non-default branches, detached HEADs with unique commits, diverged defaults, and default branches checked out in another worktree are reported as `STUCK:` with their behind count and left untouched.
 Fetches blocked by an orphaned `.git/packed-refs.lock` use bounded retries and remove the lock only when the shared staleness proof can prove it abandoned; [configuration.md](configuration.md#toolchain) owns the recovery details and tuning knobs.
 Local-only projects, clones without an origin remote, and fetch failures remain benign skips.
