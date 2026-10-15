@@ -13,9 +13,11 @@
 # self-cleaning temp root. Nothing touches the live fleet, its worktrees, or
 # projects/.
 #
-# The fixture seeds upstream from THIS repo's origin/<default> and the home from
-# its current HEAD, so the "local patches" under test are the real ones this home
-# carries. A checkout with no local commits (upstream CI, or a home whose patches
+# The fixture seeds upstream from the upstream commit THIS repo's HEAD sits on
+# (its merge base with origin/<default>) and the home from its current HEAD, so
+# the "local patches" under test are the real ones this home carries. The merge
+# base, not the origin/<default> tip, because a fetch moves that tip past the
+# carried base whenever upstream has advanced and the update is not yet applied. A checkout with no local commits (upstream CI, or a home whose patches
 # have all landed upstream) has nothing to exercise and skips.
 set -u
 
@@ -26,8 +28,8 @@ TMP_ROOT=$(fm_test_tmproot fm-local-update)
 
 DEFAULT=$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main)
 DEFAULT=${DEFAULT#origin/}
-UPSTREAM_TIP=$(git -C "$ROOT" rev-parse --verify --quiet "refs/remotes/origin/$DEFAULT" 2>/dev/null || echo "")
 HOME_TIP=$(git -C "$ROOT" rev-parse --verify --quiet HEAD 2>/dev/null || echo "")
+UPSTREAM_TIP=$(git -C "$ROOT" merge-base HEAD "refs/remotes/origin/$DEFAULT" 2>/dev/null || echo "")
 
 [ -n "$UPSTREAM_TIP" ] && [ -n "$HOME_TIP" ] || {
   echo "skip: no origin/$DEFAULT to seed a fixture from"
@@ -52,7 +54,8 @@ new_fixture() {
   git -C "$ROOT" push --quiet "$up" "$UPSTREAM_TIP:refs/heads/$DEFAULT"
   git clone --quiet "$up" "$home"
   git -C "$home" fetch --quiet "$ROOT" "$HOME_TIP"
-  git -C "$home" merge --quiet --ff-only FETCH_HEAD
+  git -C "$home" merge --quiet --ff-only FETCH_HEAD \
+    || fail "fixture $name: the home's patches do not fast-forward from the seeded upstream"
   printf '%s\n' "$home"
 }
 
@@ -202,6 +205,29 @@ test_reverted_patch_is_reported_as_lost() {
   pass "a patch reverted in the working tree is reported as lost"
 }
 
+test_brief_decision_key_patch_is_verified() {
+  local home
+  home=$(new_fixture brief-key)
+  git -C "$ROOT" diff --quiet "$UPSTREAM_TIP" "$HOME_TIP" -- bin/fm-brief.sh && {
+    echo "skip: bin/fm-brief.sh carries no local patch"
+    return 0
+  }
+
+  run_wrapper "$home" --verify
+  expect_code 0 "$WRAPPER_RC" "verify with the brief key-spelling patch intact"
+  assert_contains "$WRAPPER_OUT" "local-patch brief-decision-key-format: applied" \
+    "the intact brief key-spelling patch must verify as applied"
+
+  git -C "$home" show "$UPSTREAM_TIP:bin/fm-brief.sh" > "$home/bin/fm-brief.sh"
+  run_wrapper "$home" --verify
+  expect_code 2 "$WRAPPER_RC" "verify with the brief key-spelling patch reverted"
+  assert_contains "$WRAPPER_OUT" "local-patch brief-decision-key-format: LOST" \
+    "a reverted brief key-spelling patch must be reported as lost"
+  assert_contains "$WRAPPER_OUT" "restore: fm/fm-brief-decision-key-format@" \
+    "the report must name the fork branch that restores the brief patch"
+  pass "the brief key-spelling patch verifies when present and is reported lost when reverted"
+}
+
 test_refuses_outside_the_primary_checkout() {
   local home
   home=$(new_fixture detached)
@@ -220,6 +246,7 @@ test_update_still_lands_when_the_ref_was_already_fetched
 test_nothing_to_do_is_reported_and_verified
 test_conflicting_upstream_change_stops_loudly
 test_reverted_patch_is_reported_as_lost
+test_brief_decision_key_patch_is_verified
 test_refuses_outside_the_primary_checkout
 
 echo "all fm-local-update tests passed"
