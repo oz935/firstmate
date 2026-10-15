@@ -570,7 +570,13 @@ When a routed-work phase has a supervisor-actionable material change worth repor
 If its first reportable event is \`working [key=<work-slug>]: {material phase}\`, use the same key on its later \`$PAUSED_VERB\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event so the earlier working phase is superseded.
 When a keyed phase ends without another reportable state, append \`resolved [key=<work-slug>] [at=<epoch>]: {why it is no longer active}\`.
 \`resolved\` separately closes an escalated decision or blocker, and only a \`resolved\` line carrying that decision's exact key closes it: a later \`done\` or \`working\` event never does, even when the answer is what started that work.
-The main firstmate's answer normally writes that closing line at answer time; when a blocker or wait clears WITHOUT an answer from the main firstmate, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (keyed with \`[key=<slug>]\` if you opened it with one) as your domain resumes.
+The main firstmate's answer normally writes that closing line at answer time; when a blocker or wait clears WITHOUT an answer from the main firstmate, append the closing line yourself as your domain resumes.
+Put the key token between the verb and the colon, next to the time stamp, and reuse the exact key you opened the event with; copy one of these templates, replacing only <slug>, <epoch>, and the text after the colon (a slug uses only letters, digits, \`.\`, \`_\`, and \`-\`, such as \`api-shape\`; any other character makes the whole line unreadable):
+    needs-decision [key=<slug>] [at=<epoch>]: {summary of options}
+    blocked [key=<slug>] [at=<epoch>]: {why}
+    resolved [key=<slug>] [at=<epoch>]: {how it cleared}
+These shapes are WRONG, because the token is not read as the key and the line can close an unrelated decision or leave its own open: \`[key=<slug>] resolved: ...\`, \`resolved [<slug>]: ...\`.
+If you opened the event with no key, close it with a bare \`resolved [at=<epoch>]: {how it cleared}\`.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 
 # Definition of done
@@ -711,7 +717,13 @@ $CREWMATE_PAUSE_INSTRUCTIONS
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision [at=<epoch>]: {summary of options}\` and stop. Firstmate will reply with the decision.
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
-   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
+   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append the closing line yourself as you resume.
+   Put the key token between the verb and the colon, next to the time stamp, and reuse the exact key you opened the event with; copy one of these templates, replacing only <slug>, <epoch>, and the text after the colon (a slug uses only letters, digits, \`.\`, \`_\`, and \`-\`, such as \`api-shape\`; any other character makes the whole line unreadable):
+       needs-decision [key=<slug>] [at=<epoch>]: {summary of options}
+       blocked [key=<slug>] [at=<epoch>]: {why}
+       resolved [key=<slug>] [at=<epoch>]: {how it cleared}
+   These shapes are WRONG, because the token is not read as the key and the line can close an unrelated decision or leave its own open: \`[key=<slug>] resolved: ...\`, \`resolved [<slug>]: ...\`.
+   If you opened the event with no key, close it with a bare \`resolved [at=<epoch>]: {how it cleared}\`.
 $SHARED_INFRA_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
@@ -791,7 +803,13 @@ $CREWMATE_PAUSE_INSTRUCTIONS
    append \`needs-decision [at=<epoch>]: {summary of options}\` and stop. Firstmate will reply with the decision.
 $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
-   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
+   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append the closing line yourself as you resume.
+   Put the key token between the verb and the colon, next to the time stamp, and reuse the exact key you opened the event with; copy one of these templates, replacing only <slug>, <epoch>, and the text after the colon (a slug uses only letters, digits, \`.\`, \`_\`, and \`-\`, such as \`api-shape\`; any other character makes the whole line unreadable):
+       needs-decision [key=<slug>] [at=<epoch>]: {summary of options}
+       blocked [key=<slug>] [at=<epoch>]: {why}
+       resolved [key=<slug>] [at=<epoch>]: {how it cleared}
+   These shapes are WRONG, because the token is not read as the key and the line can close an unrelated decision or leave its own open: \`[key=<slug>] resolved: ...\`, \`resolved [<slug>]: ...\`.
+   If you opened the event with no key, close it with a bare \`resolved [at=<epoch>]: {how it cleared}\`.
 $SHARED_INFRA_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
