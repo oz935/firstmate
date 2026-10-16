@@ -228,6 +228,35 @@ test_brief_decision_key_patch_is_verified() {
   pass "the brief key-spelling patch verifies when present and is reported lost when reverted"
 }
 
+test_captain_hold_archive_patch_is_verified() {
+  local home file
+  home=$(new_fixture archive-fallback)
+  git -C "$ROOT" diff --quiet "$UPSTREAM_TIP" "$HOME_TIP" -- \
+    bin/fm-captain-hold.sh bin/fm-backlog-transition-lib.sh && {
+    echo "skip: the captain-hold archive fallback files carry no local patch"
+    return 0
+  }
+
+  run_wrapper "$home" --verify
+  expect_code 0 "$WRAPPER_RC" "verify with the captain-hold archive fallback intact"
+  assert_contains "$WRAPPER_OUT" "local-patch captain-hold-archive-fallback: applied" \
+    "the intact archive fallback must verify as applied"
+
+  # Each file carries half of the patch, so each is reverted on its own.
+  for file in bin/fm-captain-hold.sh bin/fm-backlog-transition-lib.sh; do
+    cp "$home/$file" "$home/$file.kept"
+    git -C "$home" show "$UPSTREAM_TIP:$file" > "$home/$file"
+    run_wrapper "$home" --verify
+    expect_code 2 "$WRAPPER_RC" "verify with the archive fallback reverted in $file"
+    assert_contains "$WRAPPER_OUT" "local-patch captain-hold-archive-fallback: LOST - $file" \
+      "a revert of $file must be reported as the archive fallback lost, naming the file"
+    assert_contains "$WRAPPER_OUT" "restore: fm/fm-decision-hold-pruned@" \
+      "the report must name the fork branch that restores the archive fallback"
+    mv "$home/$file.kept" "$home/$file"
+  done
+  pass "the captain-hold archive fallback verifies when present and is reported lost when either half is reverted"
+}
+
 test_refuses_outside_the_primary_checkout() {
   local home
   home=$(new_fixture detached)
@@ -247,6 +276,7 @@ test_nothing_to_do_is_reported_and_verified
 test_conflicting_upstream_change_stops_loudly
 test_reverted_patch_is_reported_as_lost
 test_brief_decision_key_patch_is_verified
+test_captain_hold_archive_patch_is_verified
 test_refuses_outside_the_primary_checkout
 
 echo "all fm-local-update tests passed"
