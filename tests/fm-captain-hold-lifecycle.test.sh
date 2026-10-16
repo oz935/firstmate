@@ -2117,6 +2117,84 @@ EOF
 # Everything a pre-collapse install already has keeps working: composed
 # identities through the shim, short decision keys in recorded metadata, a
 # concrete-origin binding, and the chat fallback for old rows.
+# Done retention moves answered captain calls into the configured Done archive
+# while the investigation that attested them may stay alive for days. Its
+# completion gate must keep accepting an attested call whose answered row now
+# lives only in that archive - and nothing looser: an archived call with no
+# recorded answer, and an id found nowhere, still refuse exactly as before.
+test_attested_calls_answered_then_archived_still_verify() {
+  local home id key out err archive
+  home=$(make_home archived-holds)
+  id=sample-archived-review
+  # A non-default archive name proves the path is read from the backlog's own
+  # configuration rather than assumed.
+  archive="$home/data/retained-done.md"
+  sed 's#^archive = .*#archive = "data/retained-done.md"#' "$home/.tasks.toml" > "$home/tasks.toml.new" \
+    && mv "$home/tasks.toml.new" "$home/.tasks.toml"
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Plan the archived sample" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the long-lived investigation"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Archived sample plan\n\nTwo captain choices remain.\n' > "$home/data/$id/report.md"
+  for key in pick-one keep-two; do
+    run_captain "$home" hold "$id-decision-$key" --title "Choose $key" \
+      --reason "captain choice $key pending" --repo sample --origin "$id" >/dev/null \
+      || fail "could not hold the legacy-shaped call $key"
+    printf 'The captain chose %s.\n' "$key" > "$home/answer-$key.txt"
+    run_captain "$home" answer "$id-decision-$key" --decision-file "$home/answer-$key.txt" >/dev/null \
+      || fail "could not record the captain's answer to $key"
+  done
+  # Pre-collapse metadata attests SHORT keys that resolve through the legacy identity.
+  printf 'decisions_reviewed=1\ndecision_keys=keep-two,pick-one\n' >> "$home/state/$id.meta"
+  run_captain "$home" verify "$id" >/dev/null || fail "the answered inventory did not verify before retention"
+
+  tasks_in "$home" prune --keep 0 >/dev/null || fail "Done retention did not run"
+  assert_grep "$id-decision-pick-one" "$archive" "retention did not move the answered call to the configured archive"
+  assert_no_grep "$id-decision-pick-one" "$home/data/backlog.md" "retention left the answered call in the backlog"
+  out=$(run_captain "$home" verify "$id" 2>&1) \
+    || fail "verify refused answered calls that retention moved to the Done archive: $out"
+  out=$(run_captain "$home" complete "$id" keep-two 2>&1) \
+    || fail "complete refused answered calls that retention moved to the Done archive: $out"
+
+  # An archived captain call with no recorded answer is not durable evidence.
+  run_captain "$home" hold "$id-decision-skip-me" --title "Choose skip-me" \
+    --reason "captain choice skip-me pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not hold the unanswered call"
+  tasks_in "$home" close "$id-decision-skip-me" --no-prune >/dev/null \
+    || fail "could not close the unanswered call outside the answer path"
+  tasks_in "$home" prune --keep 0 >/dev/null || fail "Done retention did not run a second time"
+  assert_grep "$id-decision-skip-me" "$archive" "the unanswered call was not archived"
+  printf 'decision_keys=keep-two,pick-one,skip-me\n' >> "$home/state/$id.meta"
+  if err=$(run_captain "$home" verify "$id" 2>&1); then
+    fail "verify accepted an archived captain call with no recorded answer"
+  fi
+  assert_contains "$err" "no captain-held task skip-me and no migrated hold for it" \
+    "an archived unanswered call changed the refusal: $err"
+
+  # An id found nowhere still refuses.
+  printf 'decision_keys=ghost-key,keep-two,pick-one\n' >> "$home/state/$id.meta"
+  if err=$(run_captain "$home" verify "$id" 2>&1); then
+    fail "verify accepted an attested id found nowhere"
+  fi
+  assert_contains "$err" "no captain-held task ghost-key and no migrated hold for it" \
+    "an id found nowhere changed the refusal: $err"
+
+  # The whole cleanup: the investigation's own row is archived too, and its
+  # cleanup verifies the archived calls and lands the already-archived close.
+  printf 'decision_keys=keep-two,pick-one\n' >> "$home/state/$id.meta"
+  tasks_in "$home" close "$id" --no-prune >/dev/null || fail "could not close the investigation's own row"
+  tasks_in "$home" prune --keep 0 >/dev/null || fail "Done retention did not run a third time"
+  assert_grep "] $id - " "$archive" "the investigation's own row was not archived"
+  run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
+    || fail "cleanup of an investigation whose answered calls and own row were archived failed: $(cat "$home/teardown.err")"
+  assert_absent "$home/state/$id.meta" "cleanup kept the investigation's record"
+  assert_absent "$home/state/$id.backlog-close" "cleanup left its pending-close record behind"
+  assert_grep "already closed and moved to the Done archive" "$home/teardown.out" \
+    "cleanup did not report the already-archived close"
+  pass "answered calls moved to the Done archive still verify and clean up; unanswered or missing ones still refuse"
+}
+
 test_legacy_identities_keep_working() {
   local home id hold out show legacy_text legacy_digest old_hold
   home=$(make_home legacy-compat)
@@ -4658,6 +4736,7 @@ test_reconcile_closes_with_evidence_or_keeps_the_call_open
 test_reconcile_outcomes_retry_partial_failures_once
 test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
+test_attested_calls_answered_then_archived_still_verify
 test_board_answer_reaches_the_keyed_answer_intake
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction

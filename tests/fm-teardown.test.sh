@@ -837,6 +837,45 @@ SH
   pass "teardown closes a landed GitLab task with its merge request URL as a note and GitHub and Forgejo tasks with --pr"
 }
 
+# A task whose backlog item was already closed and then moved to the Done
+# archive by retention has nothing left to close: teardown lands that close and
+# retires its pending-close record instead of failing and leaving the record for
+# every later session start. An item found nowhere still fails as before.
+test_teardown_lands_a_close_already_moved_to_the_done_archive() {
+  local case_dir out rc
+  case_dir=$(make_case tasks-axi-archived-close)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  # Run retention from the home root, as teardown addresses it, so the home's
+  # own archive path applies rather than the caller's working directory's.
+  (cd "$case_dir" && tasks-axi close task-x1 --no-prune --file "$case_dir/data/backlog.md") >/dev/null \
+    || fail "could not close the fixture item ahead of teardown"
+  (cd "$case_dir" && tasks-axi prune --keep 0 --file "$case_dir/data/backlog.md") >/dev/null \
+    || fail "could not run Done retention on the fixture backlog"
+  assert_grep 'task-x1' "$case_dir/data/done-archive.md" "retention did not archive the closed item"
+
+  out=$(run_teardown "$case_dir" 2>&1) \
+    || fail "teardown failed on an item already closed and archived: $out"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "an already-archived close left its pending-close record behind"
+  assert_absent "$case_dir/state/task-x1.meta" "teardown kept the task record"
+  printf '%s\n' "$out" | grep -F 'already closed and moved to the Done archive' >/dev/null \
+    || fail "teardown did not report the already-archived close: $out"
+
+  case_dir=$(make_case tasks-axi-close-nowhere)
+  write_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+  tasks-axi rm task-x1 --file "$case_dir/data/backlog.md" >/dev/null \
+    || fail "could not remove the fixture item"
+  rc=0
+  out=$(run_teardown "$case_dir" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "teardown reported success for an item found nowhere: $out"
+  assert_present "$case_dir/state/task-x1.backlog-close" \
+    "a failed close no longer keeps its pending-close record"
+  pass "teardown lands a close already moved to the Done archive, and still fails for an item found nowhere"
+}
+
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   local case_dir out backlog_path
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -5187,6 +5226,7 @@ test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
+test_teardown_lands_a_close_already_moved_to_the_done_archive
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator

@@ -165,6 +165,13 @@
 # a single row still held for the captain; two such rows refuse rather than
 # attest, and `complete` names each prefix-resolved row beside its attested
 # legacy id so the guess stays auditable.
+# Done retention moves answered calls out of a markdown backlog into its
+# configured archive while the origin that attested them may still be alive, so
+# `complete` and `verify` - and only they - also accept an entry, exact or
+# legacy, that resolves to nothing else but whose archived row is a closed
+# captain call carrying a recorded resolution block. An archived row without
+# one, or an entry found nowhere, refuses exactly as before
+# (bin/fm-backlog-transition-lib.sh owns how the archive is found and read).
 #
 # `open` is the read-only predicate a mechanical closer asks before it may
 # retire a task's row: is this task still an open captain call? Exit 0 means it
@@ -731,11 +738,60 @@ resolve_migrated_entry() {  # <origin-or-empty> <entry>
   return 2
 }
 
+# Read one row of the configured Done archive into TASK_SHOW_OUTPUT, with the
+# same status contract as task_show plus 2 for an archive that cannot be read.
+task_show_archived() {  # <id>; sets TASK_SHOW_OUTPUT
+  local data status=0
+  data=$(fm_backlog_data_absolute "$DATA") || fail "data directory cannot be resolved: $DATA"
+  TASK_SHOW_OUTPUT=$(fm_backlog_archived_row_show "$data" "$1" --full) || status=$?
+  return "$status"
+}
+
+# An archived row counts only as a closed captain call with a recorded answer.
+archived_call_resolved() {  # <show-output>
+  local show=$1
+  [ "$(show_field "$show" state)" = "done" ] || return 1
+  [ "$(show_field_value "$show" hold_kind)" = captain ] \
+    || [ "$(show_field_value "$show" kind)" = captain ] || return 1
+  body_has_resolution_record "$(show_field "$show" body)"
+}
+
+# The answered call an entry names, exact id then legacy identity, when Done
+# retention moved it to the archive. Prints "<id> archived" and returns 0, 1
+# when no qualifying archived row exists, and 2 or 124 when the read failed.
+resolve_archived_entry() {  # <origin-or-empty> <entry>
+  local origin=$1 entry=$2 candidates=$2 candidate rc
+  if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
+    candidates="$candidates $(legacy_hold_id "$origin" "$entry")"
+  fi
+  for candidate in $candidates; do
+    rc=0
+    task_show_archived "$candidate" || rc=$?
+    case "$rc" in
+      0) ;;
+      1) continue ;;
+      124) return 124 ;;
+      *)
+        printf 'fm-captain-hold: the Done archive could not be read for %s: %s\n' \
+          "$candidate" "${TASK_SHOW_OUTPUT%%$'\n'*}" >&2
+        return 2
+        ;;
+    esac
+    if archived_call_resolved "$TASK_SHOW_OUTPUT"; then
+      printf '%s archived' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Resolve one inventory entry or channel key to the task that carries it: the
 # exact task id when it exists, else the legacy derived identity, else - on the
-# beads backend - the migrated row the markdown-to-beads hold migration wrote.
-# Prints "<resolved id> <how>", where <how> is exact, legacy, migrated-note or
-# migrated-prefix, so a caller can record which evidence carried the attestation.
+# beads backend - the migrated row the markdown-to-beads hold migration wrote,
+# else - only when CAPTAIN_RESOLVE_ARCHIVED=1 - an answered call in the Done
+# archive. Prints "<resolved id> <how>", where <how> is exact, legacy,
+# migrated-note, migrated-prefix or archived, so a caller can record which
+# evidence carried the attestation.
 resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
   local origin=$1 entry=$2 legacy migrated rc
   if task_show "$entry"; then
@@ -756,6 +812,15 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
     2) return 2 ;;
     124) return 124 ;;
   esac
+  if [ "${CAPTAIN_RESOLVE_ARCHIVED:-0}" = 1 ]; then
+    rc=0
+    migrated=$(resolve_archived_entry "$origin" "$entry") || rc=$?
+    case "$rc" in
+      0) printf '%s' "$migrated"; return 0 ;;
+      2) return 2 ;;
+      124) return 124 ;;
+    esac
+  fi
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
     fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA); the nearest legacy identity $legacy also resolves to nothing"
@@ -871,7 +936,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ] && [ "$entry" = "$origin" ]; then
     refuse_self_inventory "$origin" "$entry"
   fi
-  resolved=$(resolve_entry "$origin" "$entry") || resolve_status=$?
+  resolved=$(CAPTAIN_RESOLVE_ARCHIVED=1 resolve_entry "$origin" "$entry") || resolve_status=$?
   if [ "$resolve_status" -ne 0 ]; then
     [ "$resolve_status" -ne 124 ] \
       || fail "the backlog backend exceeded its read bound resolving $entry"
@@ -879,7 +944,16 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
   fi
   id=${resolved%% *}
   how=${resolved##* }
-  verify_hold_durable "$id"
+  if [ "$how" = archived ]; then
+    task_show_archived "$id" || {
+      [ "$?" -ne 124 ] || fail "the backlog backend exceeded its read bound reading archived $id"
+      fail "captain-held task $id left the Done archive while it was being verified"
+    }
+    archived_call_resolved "$TASK_SHOW_OUTPUT" \
+      || fail "captain-held task $id is neither held for the captain nor closed with a recorded captain answer"
+  else
+    verify_hold_durable "$id"
+  fi
   id=$(show_field_value "$TASK_SHOW_OUTPUT" id)
   validate_slug backend-task-id "$id"
   stored=$(body_hold_origin "$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)")")
