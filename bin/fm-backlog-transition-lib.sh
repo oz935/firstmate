@@ -68,6 +68,10 @@ FM_BACKLOG_ROW_ERROR=
 # the row is not held.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_ROW_HOLD_KIND=
+# Set by fm_backlog_close_transition: 1 when the row was already closed and
+# moved to the Done archive, so the close landed without touching it.
+# shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+FM_BACKLOG_CLOSE_ARCHIVED=0
 # Set by fm_backlog_close_marker_replay: closed | closed_incomplete | retained |
 # retained_incomplete | answered | stale | noop.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
@@ -476,6 +480,142 @@ fm_backlog_row_probe() {  # <data-dir> <id>
   return 0
 }
 
+# DONE ARCHIVE. Done retention (`tasks-axi prune`, which `tasks-axi done` also
+# runs) moves closed markdown rows into the configured archive, where
+# `tasks-axi show` no longer finds them. Only a caller that must tell "closed
+# and archived" from "absent" reads it; every other read and mutation sees the
+# active backlog alone. fm_backlog_archive_file resolves the archive the way
+# tasks-axi does: `[markdown] archive` from the root's .tasks.toml, else from
+# $HOME/.tasks-axi/config.toml, a relative value against the root, and
+# otherwise done-archive.md beside the backlog file.
+fm_backlog_markdown_archive_from_toml() {  # <toml-path>
+  [ -f "$1" ] || return 1
+  LC_ALL=C awk '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    BEGIN { markdown = 0; found = 0; single = sprintf("%c", 39) }
+    {
+      line = $0
+      sub(/[[:space:]]*#.*/, "", line)
+      line = trim(line)
+      if (line ~ /^\[[^]]+\]$/) { markdown = (line == "[markdown]"); next }
+      if (markdown && line ~ /^archive[[:space:]]*=/) {
+        sub(/^archive[[:space:]]*=[[:space:]]*/, "", line)
+        line = trim(line)
+        if ((substr(line, 1, 1) == "\"" && substr(line, length(line), 1) == "\"") ||
+            (substr(line, 1, 1) == single && substr(line, length(line), 1) == single)) {
+          print substr(line, 2, length(line) - 2)
+          found = 1
+          exit
+        }
+      }
+    }
+    END { if (!found) exit 1 }
+  ' "$1"
+}
+
+fm_backlog_archive_file() {  # <resolved-data-dir>
+  local data=$1 root archive
+  root=$(fm_backlog_root "$data") || return 1
+  if ! archive=$(fm_backlog_markdown_archive_from_toml "$root/.tasks.toml"); then
+    if [ -z "${HOME:-}" ] \
+      || ! archive=$(fm_backlog_markdown_archive_from_toml "$HOME/.tasks-axi/config.toml"); then
+      printf '%s/done-archive.md\n' "${data%/}"
+      return 0
+    fi
+  fi
+  case "$archive" in
+    /*) printf '%s\n' "$archive" ;;
+    *) printf '%s/%s\n' "${root%/}" "$archive" ;;
+  esac
+}
+
+# Print one archived row's `tasks-axi show` output through tasks-axi's own
+# parser, newest archived copy first. The archive's dated sections are re-laid
+# into a scratch backlog - closed rows under Done, any other row under Queued,
+# so the shown state stays the row's own - and read there, never in place.
+# Returns 0 when found, 1 (with `code: NOT_FOUND`) when no archived row carries
+# the id or the backend keeps no markdown archive, 124 on the read bound, and 2
+# when the archive cannot be read.
+fm_backlog_archived_row_show() {  # <resolved-data-dir> <id> [flag...]
+  local data=$1 id=$2 root backend archive scratch out status secs=${FM_BACKLOG_ROW_TIMEOUT_SECS:-10}
+  shift 2
+  case "$secs" in ''|*[!0-9]*) secs=10 ;; esac
+  [ "$secs" -gt 0 ] 2>/dev/null || secs=10
+  root=$(fm_backlog_root "$data") || { printf '%s\n' "$FM_BACKLOG_TRANSITION_ERROR"; return 2; }
+  backend=$(fm_tasks_axi_backend "$root" 2>&1) || { printf '%s\n' "$backend"; return 2; }
+  if [ "$backend" != markdown ]; then
+    printf 'code: NOT_FOUND\n'
+    return 1
+  fi
+  archive=$(fm_backlog_archive_file "$data") || { printf 'the Done archive cannot be resolved\n'; return 2; }
+  if [ ! -e "$archive" ]; then
+    printf 'code: NOT_FOUND\n'
+    return 1
+  fi
+  if [ ! -f "$archive" ] || [ ! -r "$archive" ]; then
+    printf 'the Done archive is not a readable file at %s\n' "$archive"
+    return 2
+  fi
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/fm-backlog-archive.XXXXXX") \
+    || { printf 'cannot stage a read of the Done archive\n'; return 2; }
+  if ! printf 'backend = "markdown"\n\n[markdown]\narchive = "scratch-archive.md"\n' > "$scratch/.tasks.toml" \
+    || ! LC_ALL=C awk '
+      function keep() {
+        if (row == "") return
+        if (closed) done_rows[++done_count] = row
+        else open_rows[++open_count] = row
+        row = ""
+      }
+      /^- \[[xX]\] / { keep(); row = $0; closed = 1; next }
+      /^- \[ \] / { keep(); row = $0; closed = 0; next }
+      /^#/ { keep(); next }
+      { if (row != "") row = row "\n" $0 }
+      END {
+        keep()
+        print "# Backlog\n\n## In flight\n\n## Queued"
+        for (i = open_count; i >= 1; i--) print open_rows[i]
+        print "\n## Done"
+        for (i = done_count; i >= 1; i--) print done_rows[i]
+      }
+    ' "$archive" > "$scratch/backlog.md"; then
+    rm -rf "$scratch"
+    printf 'cannot stage a read of the Done archive at %s\n' "$archive"
+    return 2
+  fi
+  # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
+  out=$(fm_run_timed "$secs" bash -c 'cd "$1" 2>/dev/null || exit 1; shift; exec tasks-axi show "$@"' \
+    _ "$scratch" "$id" "$@" --file "$scratch/backlog.md" 2>&1)
+  status=$?
+  rm -rf "$scratch"
+  if [ "$status" -eq 124 ]; then
+    printf 'tasks-axi show %s exceeded its %ss Done archive read bound\n' "$id" "$secs"
+    return 124
+  fi
+  printf '%s\n' "$out"
+  [ "$status" -eq 0 ] && return 0
+  printf '%s\n' "$out" | grep -q '^code: NOT_FOUND$' && return 1
+  return 2
+}
+
+# Whether <id> is absent from the active backlog and closed in its Done archive.
+# Preserves FM_BACKLOG_TRANSITION_ERROR, which still names the failure that led
+# the caller here.
+fm_backlog_closed_in_archive() {  # <data-dir> <id>
+  local data id=$2 saved_error=$FM_BACKLOG_TRANSITION_ERROR out rc=1
+  if data=$(fm_backlog_data_absolute "$1") \
+    && ! fm_backlog_row_probe "$1" "$id" && [ "$FM_BACKLOG_ROW_RESULT" = not_found ] \
+    && out=$(fm_backlog_archived_row_show "$data" "$id") \
+    && [ "$(printf '%s\n' "$out" | sed -n 's/^  state: *//p' | head -1)" = "done" ]; then
+    rc=0
+  fi
+  FM_BACKLOG_TRANSITION_ERROR=$saved_error
+  return "$rc"
+}
+
 # Run one tasks-axi mutation against <home>'s backlog, capturing its first
 # output line in FM_BACKLOG_TRANSITION_ERROR on failure. The home boundary is
 # authorized through fm_backlog_source_present first; fm_backlog_tasks_axi owns
@@ -848,11 +988,19 @@ fm_backlog_dispatch_rollback() {
   return 0
 }
 
+# A row Done retention already moved to the archive was closed before this
+# close ran, so the close has landed and its record is retired rather than kept
+# for a replay that can never find the row; FM_BACKLOG_CLOSE_ARCHIVED tells the
+# caller its completion links were not added to that archived row.
 fm_backlog_close_transition() {
   local meta=$1 marker=$2 data=$3 id=$4 state=$5
   shift 5
+  FM_BACKLOG_CLOSE_ARCHIVED=0
   [ -z "$meta" ] || fm_backlog_record_remove "$meta" "task record" "$state" || return 1
-  fm_backlog_done "$data" "$id" "$@" || return 1
+  if ! fm_backlog_done "$data" "$id" "$@"; then
+    fm_backlog_closed_in_archive "$data" "$id" || return 1
+    FM_BACKLOG_CLOSE_ARCHIVED=1
+  fi
   fm_backlog_record_remove "$marker" "pending-close record" "$state"
 }
 
