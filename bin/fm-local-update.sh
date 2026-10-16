@@ -74,13 +74,14 @@ esac
 # made is gone - that is the manifest's rule 3, and it is the failure this whole
 # mechanism exists to catch.
 
-PATCH_IDS="spawn-bare-clone fleet-sync-bare-clone spawn-settings-pretty-print brief-decision-key-format"
+PATCH_IDS="spawn-bare-clone fleet-sync-bare-clone spawn-settings-pretty-print brief-decision-key-format captain-hold-archive-fallback"
 
 patch_file() {
   case "$1" in
     spawn-bare-clone | spawn-settings-pretty-print) echo "bin/fm-spawn.sh" ;;
     fleet-sync-bare-clone) echo "bin/fm-fleet-sync.sh" ;;
     brief-decision-key-format) echo "bin/fm-brief.sh" ;;
+    captain-hold-archive-fallback) echo "bin/fm-captain-hold.sh" ;;
   esac
 }
 
@@ -98,6 +99,9 @@ patch_source() {
     brief-decision-key-format)
       echo "fm/fm-brief-decision-key-format@611d0c9ff6e5ecbc2380e8da4c2ea827d0bf4d76"
       ;;
+    captain-hold-archive-fallback)
+      echo "fm/fm-decision-hold-pruned@c888874f6a5e79434cf234b067804535d1e9fded"
+      ;;
   esac
 }
 
@@ -107,7 +111,7 @@ patch_source() {
 # surviving fragment. VERIFY_DETAIL names the first failing anchor.
 VERIFY_DETAIL=""
 verify_one() {
-  local id=$1 f
+  local id=$1 f lib
   f="$FM_ROOT/$(patch_file "$id")"
   VERIFY_DETAIL=""
   if [ ! -f "$f" ]; then
@@ -186,6 +190,35 @@ verify_one() {
         VERIFY_DETAIL="the ambiguous trailing key parenthetical is back"
         return 1
       fi
+      ;;
+    captain-hold-archive-fallback)
+      # The Done-archive fallback spans two files: the completion gate's
+      # archived-entry resolver and its call site in bin/fm-captain-hold.sh, and
+      # the archive reader plus the close transition's archived-close check in
+      # bin/fm-backlog-transition-lib.sh. Each file is checked on its own so a
+      # half-replayed rebase names the file that lost its half.
+      lib="$FM_ROOT/bin/fm-backlog-transition-lib.sh"
+      grep -q '^resolve_archived_entry()' "$f" || {
+        VERIFY_DETAIL="bin/fm-captain-hold.sh: resolve_archived_entry() is gone"
+        return 1
+      }
+      grep -q 'CAPTAIN_RESOLVE_ARCHIVED=1 resolve_entry' "$f" || {
+        VERIFY_DETAIL="bin/fm-captain-hold.sh: the completion gate no longer resolves archived entries"
+        return 1
+      }
+      [ -f "$lib" ] || {
+        VERIFY_DETAIL="bin/fm-backlog-transition-lib.sh is missing"
+        return 1
+      }
+      grep -q '^fm_backlog_archived_row_show()' "$lib" || {
+        VERIFY_DETAIL="bin/fm-backlog-transition-lib.sh: fm_backlog_archived_row_show() is gone"
+        return 1
+      }
+      # shellcheck disable=SC2016  # A literal source line, not an expansion.
+      grep -q 'fm_backlog_closed_in_archive "$data" "$id" || return 1' "$lib" || {
+        VERIFY_DETAIL="bin/fm-backlog-transition-lib.sh: the close transition no longer lands an archived close"
+        return 1
+      }
       ;;
     *)
       VERIFY_DETAIL="no verification defined"
