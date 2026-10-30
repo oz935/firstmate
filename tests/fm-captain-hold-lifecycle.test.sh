@@ -2292,7 +2292,8 @@ EOF
 # while the investigation that attested them may stay alive for days. Its
 # completion gate must keep accepting an attested call whose answered row now
 # lives only in that archive - and nothing looser: an archived call with no
-# recorded answer, and an id found nowhere, still refuse exactly as before.
+# recorded answer, and an id found nowhere, still refuse. Once the investigation's
+# own row is archived as well, its cleanup lands the already-archived close.
 test_attested_calls_answered_then_archived_still_verify() {
   local home id key out err archive
   home=$(make_home archived-holds)
@@ -2340,7 +2341,7 @@ test_attested_calls_answered_then_archived_still_verify() {
   if err=$(run_captain "$home" verify "$id" 2>&1); then
     fail "verify accepted an archived captain call with no recorded answer"
   fi
-  assert_contains "$err" "no captain-held task skip-me and no migrated hold for it" \
+  assert_contains "$err" "$id-decision-skip-me is neither held for the captain nor closed with a recorded captain answer" \
     "an archived unanswered call changed the refusal: $err"
 
   # An id found nowhere still refuses.

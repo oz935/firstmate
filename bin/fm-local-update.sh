@@ -202,18 +202,14 @@ verify_one() {
       fi
       ;;
     captain-hold-archive-fallback)
-      # The Done-archive fallback spans two files: the completion gate's
-      # archived-entry resolver and its call site in bin/fm-captain-hold.sh, and
-      # the archive reader plus the close transition's archived-close check in
-      # bin/fm-backlog-transition-lib.sh. Each file is checked on its own so a
-      # half-replayed rebase names the file that lost its half.
+      # Upstream now ships the completion gate's half (it reads the Done archive
+      # through captain_markdown_archive_path in bin/fm-captain-hold.sh, #6094), so
+      # only the teardown half is still carried: the archive reader plus the close
+      # transition's archived-close check in bin/fm-backlog-transition-lib.sh. The
+      # gate's upstream reader is asserted too, so an upstream removal is noticed.
       lib="$FM_ROOT/bin/fm-backlog-transition-lib.sh"
-      grep -q '^resolve_archived_entry()' "$f" || {
-        VERIFY_DETAIL="bin/fm-captain-hold.sh: resolve_archived_entry() is gone"
-        return 1
-      }
-      grep -q 'CAPTAIN_RESOLVE_ARCHIVED=1 resolve_entry' "$f" || {
-        VERIFY_DETAIL="bin/fm-captain-hold.sh: the completion gate no longer resolves archived entries"
+      grep -q '^captain_markdown_archive_path()' "$f" || {
+        VERIFY_DETAIL="bin/fm-captain-hold.sh: the completion gate's Done-archive reader (upstream) is gone"
         return 1
       }
       [ -f "$lib" ] || {
