@@ -232,7 +232,7 @@ test_captain_hold_archive_patch_is_verified() {
   local home file
   home=$(new_fixture archive-fallback)
   git -C "$ROOT" diff --quiet "$UPSTREAM_TIP" "$HOME_TIP" -- \
-    bin/fm-captain-hold.sh bin/fm-backlog-transition-lib.sh && {
+    bin/fm-backlog-transition-lib.sh && {
     echo "skip: the captain-hold archive fallback files carry no local patch"
     return 0
   }
@@ -242,19 +242,19 @@ test_captain_hold_archive_patch_is_verified() {
   assert_contains "$WRAPPER_OUT" "local-patch captain-hold-archive-fallback: applied" \
     "the intact archive fallback must verify as applied"
 
-  # Each file carries half of the patch, so each is reverted on its own.
-  for file in bin/fm-captain-hold.sh bin/fm-backlog-transition-lib.sh; do
-    cp "$home/$file" "$home/$file.kept"
-    git -C "$home" show "$UPSTREAM_TIP:$file" > "$home/$file"
-    run_wrapper "$home" --verify
-    expect_code 2 "$WRAPPER_RC" "verify with the archive fallback reverted in $file"
-    assert_contains "$WRAPPER_OUT" "local-patch captain-hold-archive-fallback: LOST - $file" \
-      "a revert of $file must be reported as the archive fallback lost, naming the file"
-    assert_contains "$WRAPPER_OUT" "restore: fm/fm-decision-hold-pruned@" \
-      "the report must name the fork branch that restores the archive fallback"
-    mv "$home/$file.kept" "$home/$file"
-  done
-  pass "the captain-hold archive fallback verifies when present and is reported lost when either half is reverted"
+  # Upstream now ships the completion gate's half (#6094), so only the teardown
+  # half in bin/fm-backlog-transition-lib.sh is reverted here.
+  file=bin/fm-backlog-transition-lib.sh
+  cp "$home/$file" "$home/$file.kept"
+  git -C "$home" show "$UPSTREAM_TIP:$file" > "$home/$file"
+  run_wrapper "$home" --verify
+  expect_code 2 "$WRAPPER_RC" "verify with the archive fallback reverted in $file"
+  assert_contains "$WRAPPER_OUT" "local-patch captain-hold-archive-fallback: LOST - $file" \
+    "a revert of $file must be reported as the archive fallback lost, naming the file"
+  assert_contains "$WRAPPER_OUT" "restore: fm/fm-decision-hold-pruned@" \
+    "the report must name the fork branch that restores the archive fallback"
+  mv "$home/$file.kept" "$home/$file"
+  pass "the captain-hold archive fallback verifies when present and is reported lost when its teardown half is reverted"
 }
 
 test_refuses_outside_the_primary_checkout() {
