@@ -69,23 +69,25 @@ fi
 outcomes_json() {
   jq -cR --argjson since "$SINCE" --argjson now "$NOW" '
     fromjson? | select(type == "object" and (.epoch | type) == "number")
-    | select(.epoch >= $since and .epoch <= $now)' "$OUTCOMES" | jq -s '.'
+    | select(.epoch >= $since and .epoch <= $now)' "$OUTCOMES"
 }
 
 ledger_json() {
   if [ -r "$LEDGER" ]; then
     jq -cR --argjson now "$NOW" '
-      fromjson? | select(type == "object" and (.ts | type) == "number" and .ts <= $now)' "$LEDGER" | jq -s '.'
-  else
-    echo '[]'
+      fromjson? | select(type == "object" and (.ts | type) == "number" and .ts <= $now)' "$LEDGER"
   fi
 }
 
+# The filtered records reach the report through temp files and --slurpfile,
+# never argv: a multi-day window over a busy home is megabytes, past the
+# argument-size limit.
 report() {
-  local rows ledger
-  rows=$(outcomes_json)
-  ledger=$(ledger_json)
-  jq -nr --argjson rows "$rows" --argjson ledger "$ledger" \
+  local tmp rc=0
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-retro.XXXXXX")
+  outcomes_json >"$tmp/rows.jsonl"
+  ledger_json >"$tmp/ledger.jsonl"
+  jq -nr --slurpfile rows "$tmp/rows.jsonl" --slurpfile ledger "$tmp/ledger.jsonl" \
     --argjson days "$DAYS" --argjson since "$SINCE" --argjson stormmin "$STORM_MIN" '
     def pct(a; b): if b == 0 then 0 else ((a * 1000 / b) | round) / 10 end;
     def kind: (.wake // "" | split(":")[0] | if . == "" then "unknown" else . end);
@@ -156,7 +158,9 @@ report() {
            "- Median dispatch to ready for review: \([$t[] | select(.d != null and .r != null and .r >= $since) | .r - .d] | median | dur).",
            "- Median ready for review to merged: \([$merged[] | select(.r != null) | .m - .r] | median | dur)."
        end)
-  '
+  ' || rc=$?
+  rm -rf "$tmp"
+  return "$rc"
 }
 
 if [ -n "$OUT" ]; then

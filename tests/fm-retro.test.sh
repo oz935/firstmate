@@ -77,5 +77,17 @@ test_out_file_written() {
   pass "writes the report to --out"
 }
 
-fm_test_run test_reports_routine_share_and_storm test_wider_window_includes_older_records \
+test_large_log_does_not_overflow_argv() {
+  local s="$TMP_ROOT/large/state" out long
+  mkdir -p "$s"
+  long=$(printf '%0300d' 0)
+  awk -v now="$NOW" -v long="$long" 'BEGIN { for (i = 1; i <= 2000; i++)
+    printf "{\"seq\":%d,\"epoch\":%d,\"task\":\"t%d\",\"wake\":\"signal: x\",\"verdict\":\"routine\",\"summary\":\"%s\"}\n", i, now - i * 30, i % 7, long }' \
+    >"$s/branch-outcomes.jsonl"
+  out=$(FM_STATE_OVERRIDE="$s" "$RETRO" --now "$NOW") || fail "retro failed on a large log: $out"
+  case "$out" in *"2000 notifications handled"*) ;; *) fail "large log miscounted: $out" ;; esac
+  pass "a log larger than one command-line argument still reports"
+}
+
+fm_test_run test_reports_routine_share_and_storm test_large_log_does_not_overflow_argv test_wider_window_includes_older_records \
   test_ledger_cycle_times test_missing_log_and_bad_args test_out_file_written
